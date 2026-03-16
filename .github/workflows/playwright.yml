@@ -1,0 +1,71 @@
+name: Playwright E2E Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  BASE_URL: http://localhost:3000
+  API_BASE_URL: http://localhost:8000
+  ADMIN_EMAIL: admin@example.com
+  ADMIN_PASSWORD: Admin123!
+  USER_EMAIL: user@example.com
+  USER_PASSWORD: User123!
+  CI: true
+
+jobs:
+  e2e-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tests/playwright-e2e/package-lock.json
+
+      - name: Start application with Docker Compose
+        run: |
+          docker compose up -d --wait
+          echo "Waiting for services to be ready..."
+          timeout 120 bash -c 'until curl -s http://localhost:3000 > /dev/null 2>&1; do sleep 2; done'
+          timeout 120 bash -c 'until curl -s http://localhost:8000/api/users/login/ > /dev/null 2>&1; do sleep 2; done'
+          echo "Services are ready."
+
+      - name: Install Playwright dependencies
+        working-directory: tests/playwright-e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run Playwright tests
+        working-directory: tests/playwright-e2e
+        run: npx playwright test
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: tests/playwright-e2e/playwright-report/
+          retention-days: 14
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: tests/playwright-e2e/test-results/
+          retention-days: 7
+
+      - name: Stop Docker Compose
+        if: always()
+        run: docker compose down -v
