@@ -1,0 +1,20 @@
+{
+  "name": "playwright-e2e",
+  "version": "1.0.0",
+  "description": "Playwright E2E tests for Product Management App",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:headed": "npx playwright test --headed",
+    "test:chromium": "npx playwright test --project=chromium",
+    "test:smoke": "npx playwright test --grep @smoke",
+    "test:regression": "npx playwright test --grep @regression",
+    "test:api": "npx playwright test tests/api/",
+    "report": "npx playwright show-report",
+    "test:debug": "npx playwright test --debug",
+    "test:ui": "npx playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "dotenv": "^17.3.1"
+  }
+}

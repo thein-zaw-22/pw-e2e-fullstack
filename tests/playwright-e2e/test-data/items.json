@@ -1,0 +1,34 @@
+{
+  "items": [
+    {
+      "name": "Wireless Keyboard",
+      "description": "Ergonomic wireless keyboard with backlight",
+      "category": "electronics",
+      "price": "49.99"
+    },
+    {
+      "name": "USB-C Hub",
+      "description": "7-in-1 USB-C hub with HDMI and Ethernet",
+      "category": "electronics",
+      "price": "35.00"
+    },
+    {
+      "name": "Desk Organizer",
+      "description": "Bamboo desk organizer with 5 compartments",
+      "category": "home",
+      "price": "24.95"
+    },
+    {
+      "name": "Programming Book",
+      "description": "Advanced TypeScript patterns and best practices",
+      "category": "books",
+      "price": "39.99"
+    },
+    {
+      "name": "Monitor Stand",
+      "description": "Adjustable aluminum monitor stand with USB ports",
+      "category": "electronics",
+      "price": "79.50"
+    }
+  ]
+}
