@@ -1,0 +1,81 @@
+# ============================================================
+# Docker Compose - Full-Stack Demo App for Playwright E2E Tests
+# Start everything with: docker compose up --build
+# ============================================================
+
+services:
+  # PostgreSQL database service
+  db:
+    image: postgres:15-alpine
+    container_name: demo-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: demo_app
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  # Django backend API service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: demo-backend
+    restart: unless-stopped
+    environment:
+      - SECRET_KEY=demo-secret-key-not-for-production
+      - DEBUG=True
+      - ALLOWED_HOSTS=localhost,127.0.0.1,backend
+      - DB_NAME=demo_app
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_HOST=db
+      - DB_PORT=5432
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:5173,http://frontend:3000
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - backend_media:/app/media
+    networks:
+      - app-network
+    # Generate migrations, apply them, seed data, then start the server
+    command: >
+      sh -c "python manage.py makemigrations users items --noinput &&
+             python manage.py migrate --noinput &&
+             python manage.py seed_data &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  # React frontend service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: demo-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  backend_media:
