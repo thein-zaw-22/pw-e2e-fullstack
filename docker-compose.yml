@@ -67,6 +67,9 @@ services:
     restart: unless-stopped
     ports:
       - "3000:80"
+    volumes:
+      # Override production nginx config with local dev config (proxies to backend container)
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf
     depends_on:
       - backend
     networks:

@@ -1,0 +1,13 @@
+# Production nginx config - serves React SPA only
+# ALB handles routing /api/* and /media/* to the backend
+server {
+    listen 80;
+    server_name localhost;
+
+    # Serve the React build files
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ /index.html;
+    }
+}
