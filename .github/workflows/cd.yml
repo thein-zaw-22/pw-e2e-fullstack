@@ -1,0 +1,258 @@
+# CD Pipeline: Build → Deploy to QA → E2E Tests → Manual Approval → Deploy to Prod → Smoke Tests
+name: CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_BACKEND: pw-e2e/backend
+  ECR_FRONTEND: pw-e2e/frontend
+  ECS_CLUSTER: pw-e2e-cluster
+
+permissions:
+  id-token: write
+  contents: read
+
+# ─────────────────────────────────────────────
+# Job 1: Build Docker images and push to ECR
+# ─────────────────────────────────────────────
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.vars.outputs.sha_short }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set short SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_BACKEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_BACKEND:latest ./backend
+          docker push $ECR_REGISTRY/$ECR_BACKEND:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_BACKEND:latest
+
+      - name: Build and push frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.vars.outputs.sha_short }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_FRONTEND:$IMAGE_TAG -t $ECR_REGISTRY/$ECR_FRONTEND:latest ./frontend
+          docker push $ECR_REGISTRY/$ECR_FRONTEND:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_FRONTEND:latest
+
+  # ─────────────────────────────────────────────
+  # Job 2: Deploy to QA environment
+  # ─────────────────────────────────────────────
+  deploy-qa:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: qa
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run database migrations
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster $ECS_CLUSTER \
+            --task-definition pw-e2e-qa-backend \
+            --launch-type FARGATE \
+            --network-configuration "${{ secrets.ECS_NETWORK_CONFIG }}" \
+            --overrides '{
+              "containerOverrides": [{
+                "name": "backend",
+                "command": ["sh", "-c", "python manage.py migrate --noinput && python manage.py seed_data"]
+              }]
+            }' \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Migration task: $TASK_ARN"
+          aws ecs wait tasks-stopped --cluster $ECS_CLUSTER --tasks $TASK_ARN
+
+      - name: Update QA backend service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service pw-e2e-qa-backend \
+            --force-new-deployment \
+            --query 'service.serviceName' --output text
+
+      - name: Update QA frontend service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service pw-e2e-qa-frontend \
+            --force-new-deployment \
+            --query 'service.serviceName' --output text
+
+      - name: Wait for services to stabilize
+        run: |
+          aws ecs wait services-stable --cluster $ECS_CLUSTER --services pw-e2e-qa-backend pw-e2e-qa-frontend
+          echo "✓ QA services are stable"
+
+  # ─────────────────────────────────────────────
+  # Job 3: Run E2E tests against QA
+  # ─────────────────────────────────────────────
+  e2e-tests-qa:
+    needs: deploy-qa
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: ${{ secrets.QA_URL }}
+      API_BASE_URL: ${{ secrets.QA_URL }}
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: Admin123!
+      USER_EMAIL: user@example.com
+      USER_PASSWORD: User123!
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tests/playwright-e2e/package-lock.json
+
+      - name: Install dependencies and browsers
+        working-directory: tests/playwright-e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run full E2E test suite against QA
+        working-directory: tests/playwright-e2e
+        run: npx playwright test --project chromium
+
+      - name: Upload QA test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qa-playwright-report
+          path: tests/playwright-e2e/playwright-report/
+          retention-days: 14
+
+  # ─────────────────────────────────────────────
+  # Job 4: Manual approval gate (QA sign-off)
+  # ─────────────────────────────────────────────
+  approve-prod:
+    needs: e2e-tests-qa
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Approval confirmed
+        run: echo "✓ Production deployment approved"
+
+  # ─────────────────────────────────────────────
+  # Job 5: Deploy to Production
+  # ─────────────────────────────────────────────
+  deploy-prod:
+    needs: approve-prod
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run database migrations
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster $ECS_CLUSTER \
+            --task-definition pw-e2e-prod-backend \
+            --launch-type FARGATE \
+            --network-configuration "${{ secrets.ECS_NETWORK_CONFIG }}" \
+            --overrides '{
+              "containerOverrides": [{
+                "name": "backend",
+                "command": ["sh", "-c", "python manage.py migrate --noinput"]
+              }]
+            }' \
+            --query 'tasks[0].taskArn' --output text)
+          aws ecs wait tasks-stopped --cluster $ECS_CLUSTER --tasks $TASK_ARN
+
+      - name: Update Production backend service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service pw-e2e-prod-backend \
+            --force-new-deployment \
+            --query 'service.serviceName' --output text
+
+      - name: Update Production frontend service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER \
+            --service pw-e2e-prod-frontend \
+            --force-new-deployment \
+            --query 'service.serviceName' --output text
+
+      - name: Wait for services to stabilize
+        run: |
+          aws ecs wait services-stable --cluster $ECS_CLUSTER --services pw-e2e-prod-backend pw-e2e-prod-frontend
+          echo "✓ Production services are stable"
+
+  # ─────────────────────────────────────────────
+  # Job 6: Run smoke tests against Production
+  # ─────────────────────────────────────────────
+  smoke-tests-prod:
+    needs: deploy-prod
+    runs-on: ubuntu-latest
+    env:
+      BASE_URL: ${{ secrets.PROD_URL }}
+      API_BASE_URL: ${{ secrets.PROD_URL }}
+      ADMIN_EMAIL: admin@example.com
+      ADMIN_PASSWORD: Admin123!
+      USER_EMAIL: user@example.com
+      USER_PASSWORD: User123!
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: tests/playwright-e2e/package-lock.json
+
+      - name: Install dependencies and browsers
+        working-directory: tests/playwright-e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+
+      - name: Run smoke tests against Production
+        working-directory: tests/playwright-e2e
+        run: npx playwright test --project chromium --grep @smoke
+
+      - name: Upload Production smoke test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prod-smoke-report
+          path: tests/playwright-e2e/playwright-report/
+          retention-days: 14
