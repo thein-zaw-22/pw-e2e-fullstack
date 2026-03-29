@@ -17,10 +17,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create a directory for uploaded media files
-RUN mkdir -p /app/media
+RUN mkdir -p /app/media /app/staticfiles
+
+# Collect static files for production (Django admin, DRF browsable API)
+RUN SECRET_KEY=build-placeholder python manage.py collectstatic --noinput 2>/dev/null || true
+
+# Create non-root user for security
+RUN adduser --disabled-password --no-create-home appuser && \
+    chown -R appuser:appuser /app
+USER appuser
 
 # Expose the port Django runs on
 EXPOSE 8000
 
-# Default command - can be overridden in docker-compose
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Default command - uses gunicorn for production, overridden in docker-compose for dev
+CMD ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3"]
